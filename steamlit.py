@@ -1,137 +1,98 @@
 import streamlit as st
 import pandas as pd
-from io import BytesIO
 import zipfile
-import datetime
-import pdfrw
+import os
+import shutil
+from io import BytesIO
 
-class PDFFormFiller:
-    def __init__(self):
-        self.ANNOT_KEY = '/Annots'
-        self.ANNOT_FIELD_KEY = '/T'
-        self.ANNOT_FORM_KEY = '/FT'
-        self.ANNOT_FORM_TEXT = '/Tx'
-        self.ANNOT_FORM_BUTTON = '/Btn'
-        self.SUBTYPE_KEY = '/Subtype'
-        self.WIDGET_SUBTYPE_KEY = '/Widget'
+def process_files(pdf_zip_file, excel_file):
+    # Create temporary directories
+    temp_folder = "temp_pdfs"
+    renamed_folder = "renamed_pdfs"
+    os.makedirs(temp_folder, exist_ok=True)
+    os.makedirs(renamed_folder, exist_ok=True)
 
-    def upload_files(self):
-        uploaded_excel = st.file_uploader("Upload Excel File", type=["xlsx", "xls"])
-        if uploaded_excel:
-            try:
-                self.excel_data = pd.read_excel(uploaded_excel)
-                st.success(f"Excel file uploaded: {uploaded_excel.name}")
-            except Exception as e:
-                st.error(f"Error reading Excel file: {e}")
+    try:
+        # Read Excel file
+        data = pd.read_excel(excel_file)
+        
+        # Verify Excel structure
+        if 'Account number' not in data.columns:
+            st.error("Error: The Excel file must contain a column named 'Account number'.")
+            return None
 
-        uploaded_pdf = st.file_uploader("Upload PDF Template", type="pdf")
-        if uploaded_pdf:
-            try:
-                self.pdf_template_bytes = uploaded_pdf.read()
-                self.pdf_template = pdfrw.PdfReader(BytesIO(self.pdf_template_bytes))
-                st.success(f"PDF template uploaded: {uploaded_pdf.name}")
-                self.print_pdf_fields()
-            except Exception as e:
-                st.error(f"Error reading PDF template: {e}")
+        # Extract PDFs from zip file
+        with zipfile.ZipFile(pdf_zip_file, 'r') as zip_ref:
+            zip_ref.extractall(temp_folder)
 
-    def print_pdf_fields(self):
-        if self.pdf_template:
-            fields = set()
-            for page in self.pdf_template.pages:
-                if page[self.ANNOT_KEY]:
-                    for annotation in page[self.ANNOT_KEY]:
-                        if annotation[self.ANNOT_FIELD_KEY]:
-                            if annotation[self.SUBTYPE_KEY] == self.WIDGET_SUBTYPE_KEY:
-                                key = annotation[self.ANNOT_FIELD_KEY][1:-1]
-                                fields.add(key)
-            st.write("PDF form fields found:")
-            st.write(", ".join(sorted(fields)))
-
-            if self.excel_data is not None:
-                st.write("\nExcel columns found:")
-                st.write(", ".join(self.excel_data.columns))
-
-    def fill_pdf_form(self, row_data):
-        template = pdfrw.PdfReader(BytesIO(self.pdf_template_bytes))
-        for page in template.pages:
-            if page[self.ANNOT_KEY]:
-                for annotation in page[self.ANNOT_KEY]:
-                    if annotation[self.ANNOT_FIELD_KEY]:
-                        if annotation[self.SUBTYPE_KEY] == self.WIDGET_SUBTYPE_KEY:
-                            key = annotation[self.ANNOT_FIELD_KEY][1:-1]
-                            if key in row_data:
-                                field_value = str(row_data[key])
-                                if pd.isna(field_value) or field_value.lower() == 'nan':
-                                    field_value = ''
-
-                                if annotation[self.ANNOT_FORM_KEY] == self.ANNOT_FORM_TEXT:
-                                    annotation.update(pdfrw.PdfDict(V=field_value, AP=field_value))
-                                elif annotation[self.ANNOT_FORM_KEY] == self.ANNOT_FORM_BUTTON:
-                                    annotation.update(pdfrw.PdfDict(V=pdfrw.PdfName(field_value), AS=pdfrw.PdfName(field_value)))
-                annotation.update(pdfrw.PdfDict(Ff=1))
-        template.Root.AcroForm.update(pdfrw.PdfDict(NeedAppearances=pdfrw.PdfObject('true')))
-        return template
-
-    def process_all_records(self):
-        if self.excel_data is None or self.pdf_template is None:
-            st.error("Please upload both Excel file and PDF template.")
-            return
-
-        # Ensure the 'Account number' column exists in the Excel file
-        if 'Account number' not in self.excel_data.columns:
-            st.error("The Excel file must contain a column named 'Account number'.")
-            return
-
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        zip_filename = f"filled_forms_{timestamp}.zip"
-
-        zip_buffer = BytesIO()
-        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
-            successful_count = 0
-            failed_count = 0
-
-            for index, row in self.excel_data.iterrows():
-                try:
-                    # Use 'Account number' as the filename identifier
-                    account_number = row['Account number']
-                    if pd.isna(account_number):
-                        st.warning(f"Missing 'Account number' for row {index + 1}. Skipping.")
-                        failed_count += 1
-                        continue
-
-                    pdf_filename = f"{account_number}.pdf"
-                    filled_pdf = self.fill_pdf_form(row.to_dict())
-                    pdf_buffer = BytesIO()
-                    pdfrw.PdfWriter().write(pdf_buffer, filled_pdf)
-                    pdf_bytes = pdf_buffer.getvalue()
-                    zip_file.writestr(pdf_filename, pdf_bytes)
-                    successful_count += 1
-                    st.write(f"Processed record {index + 1}/{len(self.excel_data)}: {pdf_filename}")
-                except Exception as e:
-                    failed_count += 1
-                    st.error(f"Error processing record {index}: {str(e)}")
-
-        zip_buffer.seek(0)
-        zip_content = zip_buffer.getvalue()
-
-        st.download_button(
-            label="Download Filled Forms",
-            data=zip_content,
-            file_name=zip_filename,
-            mime='application/zip'
+        # Get list of PDF files
+        pdf_files = sorted(
+            [f for f in os.listdir(temp_folder) if f.endswith('.pdf')],
+            key=lambda x: int(os.path.splitext(x)[0])
         )
 
-        st.write(f"\nProcessing complete!")
-        st.write(f"Successfully processed: {successful_count} records")
-        st.write(f"Failed to process: {failed_count} records")
+        # Verify file count matches
+        if len(pdf_files) != len(data):
+            st.error("Error: The number of PDFs does not match the number of rows in the Excel file.")
+            return None
+
+        # Rename PDFs
+        for i, pdf_file in enumerate(pdf_files):
+            account_number = str(data.iloc[i]['Account number'])
+            old_path = os.path.join(temp_folder, pdf_file)
+            new_path = os.path.join(renamed_folder, f"{account_number}.pdf")
+            os.rename(old_path, new_path)
+
+        # Create zip file in memory
+        zip_buffer = BytesIO()
+        with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files in os.walk(renamed_folder):
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    arcname = os.path.basename(file_path)
+                    zipf.write(file_path, arcname=arcname)
+
+        return zip_buffer
+
+    finally:
+        # Clean up temporary folders
+        if os.path.exists(temp_folder):
+            shutil.rmtree(temp_folder)
+        if os.path.exists(renamed_folder):
+            shutil.rmtree(renamed_folder)
 
 def main():
-    st.title("PDF Form Filler")
-    filler = PDFFormFiller()
-    filler.upload_files()
+    st.title("PDF Renamer Tool")
+    st.write("""
+    This tool helps you rename PDF files based on account numbers from an Excel file.
+    
+    Instructions:
+    1. Upload a ZIP file containing numbered PDF files (e.g., 1.pdf, 2.pdf, etc.)
+    2. Upload an Excel file with an 'Account number' column
+    3. Click 'Process Files' to rename and download the PDFs
+    """)
 
-    if st.button("Process All Records"):
-        filler.process_all_records()
+    # File uploaders
+    pdf_zip_file = st.file_uploader("Upload ZIP file containing PDFs", type=['zip'])
+    excel_file = st.file_uploader("Upload Excel file with account numbers", type=['xlsx', 'xls'])
+
+    if st.button("Process Files"):
+        if pdf_zip_file is None or excel_file is None:
+            st.error("Please upload both files before processing.")
+            return
+
+        with st.spinner("Processing files..."):
+            zip_buffer = process_files(pdf_zip_file, excel_file)
+            
+            if zip_buffer:
+                # Offer the processed file for download
+                st.success("Processing complete! Click below to download your renamed PDFs.")
+                st.download_button(
+                    label="Download Renamed PDFs",
+                    data=zip_buffer.getvalue(),
+                    file_name="renamed_pdfs.zip",
+                    mime="application/zip"
+                )
 
 if __name__ == "__main__":
     main()
